@@ -1,0 +1,14 @@
+{
+  "name": "omen-airdrop",
+  "version": "1.0.0",
+  "main": "index.js",
+  "license": "MIT",
+  "dependencies": {
+    "ethers": "^5.1.4",
+    "graphql": "^15.5.0",
+    "graphql-request": "^3.4.0"
+  },
+  "scripts": {
+    "start": "node index.js"
+  }
+}
