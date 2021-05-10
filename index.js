@@ -1,6 +1,8 @@
 const { request, gql } = require("graphql-request");
 const fs = require("fs");
 const { ethers, utils, BigNumber } = require("ethers");
+const { parseBalanceMap } = require("./src/parse-balance-map.ts");
+const { verifyProof } = require("./scripts/verify-merkle-root.ts");
 
 const GRAPH_MAINNET_HTTP =
   "https://api.thegraph.com/subgraphs/name/protofire/omen";
@@ -18,6 +20,7 @@ const userQuery = gql`
         id
       }
       collateralAmountUSD
+      transactionHash
     }
   }`;
 
@@ -235,36 +238,102 @@ const getRelayProxyAddress = async (account) => {
   }
 };
 
+const clearJson = () => {
+  try {
+    fs.unlinkSync("mainnet.json");
+    fs.unlinkSync("xdai.json");
+    fs.unlinkSync("mainnetProofs.json");
+    fs.unlinkSync("xdaiProofs.json");
+  } catch (err) {}
+};
+
 const save = async (name, obj) => {
   // save content to a json file
   let currentContent;
   try {
     currentContent = JSON.parse(fs.readFileSync(name));
   } catch (e) {}
-  const newContent = currentContent ? { ...currentContent, ...obj } : obj;
+  const newContent = currentContent ? [...currentContent, ...obj] : obj;
   fs.writeFileSync(name, JSON.stringify(newContent));
 };
 
 const addToJson = async (address, reward) => {
   // check if this user has a tight xdai integration proxy
   const proxy = await getRelayProxyAddress(address);
+
+  const entry = [
+    { address, earnings: BigNumber.from(reward).toHexString(), reasons: "" },
+  ];
+
   if (proxy) {
     // if it does, the airdrop goes to the proxy
-    return await save("xdai.json", { [proxy]: reward });
+    return await save("xdai.json", entry);
   }
 
   // is this a mainnet account? check if nonce > 0
   const nonce = await mainnetProvider.getTransactionCount(address);
   if (nonce > 0) {
-    return await save("mainnet.json", { [address]: reward });
+    return await save("mainnet.json", entry);
   }
 
   // otherwise add to xdai
-  await save("xdai.json", { [address]: reward });
+  await save("xdai.json", entry);
+};
+
+const generateMerkleRoot = () => {
+  const mainnetJson = JSON.parse(fs.readFileSync("mainnet.json"));
+  const mainnetProofs = parseBalanceMap(mainnetJson);
+  fs.writeFileSync("mainnetProofs.json", JSON.stringify(mainnetProofs));
+
+  const xdaiJson = JSON.parse(fs.readFileSync("xdai.json"));
+  const xdaiProofs = parseBalanceMap(xdaiJson);
+  fs.writeFileSync("xdaiProofs.json", xdaiProofs);
+
+  // verify that proofs work
+  const address = Object.keys(mainnetProofs.claims)[0];
+  const claim = mainnetProofs.claims[address];
+  if (
+    !verifyProof(
+      claim.index,
+      address,
+      BigNumber.from(claim.amount),
+      claim.proof.map((p) => Buffer.from(p.slice(2), "hex")),
+      Buffer.from(mainnetProofs.merkleRoot.slice(2), "hex")
+    )
+  ) {
+    throw Error("Unable to verify proof");
+  }
+
+  // verify allocations
+  const totalMainnetAllocation = Object.values(mainnetProofs.claims).reduce(
+    (p, a) => p.add(a.amount),
+    BigNumber.from("0")
+  );
+
+  const totalxDaiAllocation = Object.values(xdaiProofs.claims).reduce(
+    (p, a) => p.add(a.amount),
+    BigNumber.from("0")
+  );
+
+  const totalExpected = TOTAL_USER_REWARD.add(TOTAL_LP_REWARD);
+  const totalAllocation = totalMainnetAllocation.add(totalxDaiAllocation);
+  if (
+    !totalAllocation.eq(totalExpected) &&
+    // allow 1000 wei in errors
+    !(
+      totalAllocation.lt(totalExpected) &&
+      totalAllocation.gt(totalExpected.sub(1000))
+    )
+  ) {
+    throw new Error("Balances are incorrect");
+  }
 };
 
 const run = async () => {
-  // gather all relevant proxies addresses from mainnet and xdai
+  // clear json files if needed
+  clearJson();
+
+  // gather all relevant proxy addresses from mainnet and xdai
   const mainnet = await getAddresses(GRAPH_MAINNET_HTTP);
   const xdai = await getAddresses(GRAPH_XDAI_HTTP);
 
@@ -299,13 +368,14 @@ const run = async () => {
 
   // add rewards to json file
   const dedupedUsers = [...new Set([...totalUsers, ...totalLps])];
+
   await Promise.all(
     dedupedUsers.map(
       async (address) => await addToJson(address, rewards[address])
     )
   );
 
-  console.log("complete");
+  generateMerkleRoot();
 };
 
 run();
