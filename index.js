@@ -287,7 +287,7 @@ const generateMerkleRoot = () => {
 
   const xdaiJson = JSON.parse(fs.readFileSync("xdai.json"));
   const xdaiProofs = parseBalanceMap(xdaiJson);
-  fs.writeFileSync("xdaiProofs.json", xdaiProofs);
+  fs.writeFileSync("xdaiProofs.json", JSON.stringify(xdaiProofs));
 
   // verify that proofs work
   const address = Object.keys(mainnetProofs.claims)[0];
