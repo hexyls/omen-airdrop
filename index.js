@@ -261,13 +261,12 @@ const addToJson = async (address, reward) => {
   // check if this user has a tight xdai integration proxy
   const proxy = await getRelayProxyAddress(address);
 
-  const entry = [
-    { address, earnings: BigNumber.from(reward).toHexString(), reasons: "" },
-  ];
+  const earnings = BigNumber.from(reward).toHexString();
+  const entry = [{ address, earnings, reasons: "" }];
 
   if (proxy) {
     // if it does, the airdrop goes to the proxy
-    return await save("xdai.json", entry);
+    return await save("xdai.json", [{ address: proxy, earnings, reasons: "" }]);
   }
 
   // is this a mainnet account? check if nonce > 0
