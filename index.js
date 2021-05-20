@@ -30,11 +30,12 @@ const lpQuery = gql`
       funder {
         id
       }
+      transactionHash
     }
   }`;
 
 // utils
-const wait = () => new Promise((resolve) => setTimeout(resolve, 1000));
+const wait = () => new Promise((resolve) => setTimeout(resolve, 500));
 const mainnetProvider = new ethers.providers.JsonRpcBatchProvider(
   "https://mainnet.infura.io/v3/9c6788bb15234036991db4637638429f"
 );
@@ -93,6 +94,12 @@ const isContract = async (provider, address) => {
   return code && code !== "0x";
 };
 
+const log = (str) => {
+  process.stdout.clearLine();
+  process.stdout.cursorTo(0);
+  process.stdout.write(str);
+};
+
 // paginate through a graphql query
 const paginate = async (url, query, fn) => {
   const first = 100;
@@ -101,6 +108,7 @@ const paginate = async (url, query, fn) => {
   while (processing) {
     const data = await request(url, query, { first, skip });
     const key = Object.keys(data)[0];
+    log(`${key} processed: ${skip}`);
     await fn(data[key]);
     if (data[key].length < first) {
       processing = false;
@@ -136,25 +144,48 @@ const processUsers = async (url) => {
   return eligibleAddresses;
 };
 
-const processLps = async (url) => {
+const realitioAbi = [
+  "event LogNewQuestion(bytes32 indexed question_id, address indexed user, uint256 template_id, string question, bytes32 indexed content_hash, address arbitrator, uint32 timeout, uint32 opening_ts, uint256 nonce, uint256 created)",
+];
+
+const processLps = async (url, provider) => {
   // market creators / liquidity providers on Omen before May 1st, 2021
   let accounts = new Set();
 
   await paginate(url, lpQuery, async (data) => {
-    for (let i = 0; i < data.length; i++) {
-      const address = utils.getAddress(data[i].funder.id);
-      if (!blacklist[address]) {
-        accounts.add(address);
-      }
-    }
+    await Promise.all(
+      data.map(async (item, i) => {
+        const address = utils.getAddress(item.funder.id);
+        if (blacklist[address]) {
+          // if the address is FPMMDeterministicFactory, check the tx for the proxy address
+          const receipt = await provider.getTransactionReceipt(
+            item.transactionHash
+          );
+          const iface = new utils.Interface(realitioAbi);
+          const event = receipt.logs
+            .map((log) => {
+              try {
+                return iface.parseLog(log);
+              } catch (e) {}
+            })
+            .find((log) => log);
+          if (event) {
+            const safeAddress = event.args.user;
+            accounts.add(safeAddress);
+          }
+        } else {
+          accounts.add(address);
+        }
+      })
+    );
   });
 
   return [...accounts];
 };
 
-const getAddresses = async (url) => {
-  const users = await processUsers(url);
-  const lps = await processLps(url);
+const getAddresses = async (url, provider) => {
+  const users = await processUsers(url, provider);
+  const lps = await processLps(url, provider);
   return { users, lps };
 };
 
@@ -333,8 +364,10 @@ const run = async () => {
   clearJson();
 
   // gather all relevant proxy addresses from mainnet and xdai
-  const mainnet = await getAddresses(GRAPH_MAINNET_HTTP);
-  const xdai = await getAddresses(GRAPH_XDAI_HTTP);
+  console.log("\nfetching mainnet addresses");
+  const mainnet = await getAddresses(GRAPH_MAINNET_HTTP, mainnetProvider);
+  console.log("\nfetching xdai addresses");
+  const xdai = await getAddresses(GRAPH_XDAI_HTTP, xdaiProvider);
 
   // calc reward per user
   const totalUserProxies = [...new Set([...mainnet.users, ...xdai.users])];
@@ -374,6 +407,7 @@ const run = async () => {
     )
   );
 
+  console.log("generating merkle root");
   generateMerkleRoot();
 };
 
