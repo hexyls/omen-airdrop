@@ -369,6 +369,7 @@ const run = async () => {
   console.log("\nfetching xdai addresses");
   const xdai = await getAddresses(GRAPH_XDAI_HTTP, xdaiProvider);
 
+  console.log("\nfetching proxy owners");
   // calc reward per user
   const totalUserProxies = [...new Set([...mainnet.users, ...xdai.users])];
   const totalUsers = await getOwners(totalUserProxies);
