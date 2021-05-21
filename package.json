@@ -12,6 +12,7 @@
     "typescript": "^4.2.4"
   },
   "scripts": {
-    "start": "ts-node index.js"
+    "start": "ts-node index.js",
+    "topup": "ts-node topup.js"
   }
 }
