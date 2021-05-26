@@ -2,7 +2,7 @@ const { request, gql } = require("graphql-request");
 const fs = require("fs");
 const { ethers, utils, BigNumber } = require("ethers");
 const { parseBalanceMap } = require("./src/parse-balance-map.ts");
-const { verifyProof } = require("./scripts/verify-merkle-root.ts");
+const { verifyAirdrop } = require("./scripts/verify-merkle-root.ts");
 
 const GRAPH_MAINNET_HTTP =
   "https://api.thegraph.com/subgraphs/name/protofire/omen";
@@ -313,26 +313,13 @@ const addToJson = async (address, reward) => {
 const generateMerkleRoot = () => {
   const mainnetJson = JSON.parse(fs.readFileSync("mainnet.json"));
   const mainnetProofs = parseBalanceMap(mainnetJson);
+  verifyAirdrop(mainnetProofs);
   fs.writeFileSync("mainnetProofs.json", JSON.stringify(mainnetProofs));
 
   const xdaiJson = JSON.parse(fs.readFileSync("xdai.json"));
   const xdaiProofs = parseBalanceMap(xdaiJson);
+  verifyAirdrop(xdaiProofs);
   fs.writeFileSync("xdaiProofs.json", JSON.stringify(xdaiProofs));
-
-  // verify that proofs work
-  const address = Object.keys(mainnetProofs.claims)[0];
-  const claim = mainnetProofs.claims[address];
-  if (
-    !verifyProof(
-      claim.index,
-      address,
-      BigNumber.from(claim.amount),
-      claim.proof.map((p) => Buffer.from(p.slice(2), "hex")),
-      Buffer.from(mainnetProofs.merkleRoot.slice(2), "hex")
-    )
-  ) {
-    throw Error("Unable to verify proof");
-  }
 
   // verify allocations
   const totalMainnetAllocation = Object.values(mainnetProofs.claims).reduce(

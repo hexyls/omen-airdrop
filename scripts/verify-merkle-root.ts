@@ -80,3 +80,24 @@ export const getRoot = (
 
   return layers[layers.length - 1][0];
 };
+
+export const verifyAirdrop = (airdrop) => {
+  const merkleRoot = Buffer.from(airdrop.merkleRoot.slice(2), "hex");
+  Object.keys(airdrop.claims).forEach((address) => {
+    const claim = airdrop.claims[address];
+    const proof = claim.proof.map((p: string) =>
+      Buffer.from(p.slice(2), "hex")
+    );
+    if (
+      !verifyProof(
+        claim.index,
+        address,
+        BigNumber.from(claim.amount),
+        proof,
+        merkleRoot
+      )
+    ) {
+      throw new Error(`Verification for ${address} failed`);
+    }
+  });
+};

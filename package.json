@@ -13,6 +13,7 @@
   },
   "scripts": {
     "start": "ts-node index.js",
-    "topup": "ts-node topup.js"
+    "topup": "ts-node topup.js",
+    "verify": "ts-node ./scripts/verify.ts"
   }
 }
