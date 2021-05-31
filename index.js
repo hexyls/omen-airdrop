@@ -158,9 +158,15 @@ const processLps = async (url, provider) => {
         const address = utils.getAddress(item.funder.id);
         if (blacklist[address]) {
           // if the address is FPMMDeterministicFactory, check the tx for the proxy address
-          const receipt = await provider.getTransactionReceipt(
-            item.transactionHash
-          );
+          let receipt;
+          while (!receipt) {
+            try {
+              receipt = await provider.getTransactionReceipt(
+                item.transactionHash
+              );
+            } catch (e) {}
+            await wait();
+          }
           const iface = new utils.Interface(realitioAbi);
           const event = receipt.logs
             .map((log) => {
@@ -278,7 +284,7 @@ const clearJson = () => {
   } catch (err) {}
 };
 
-const save = async (name, obj) => {
+const save = (name, obj) => {
   // save content to a json file
   let currentContent;
   try {
@@ -288,7 +294,7 @@ const save = async (name, obj) => {
   fs.writeFileSync(name, JSON.stringify(newContent));
 };
 
-const addToJson = async (address, reward) => {
+const getEntry = async (address, reward) => {
   // check if this user has a tight xdai integration proxy
   const proxy = await getRelayProxyAddress(address);
 
@@ -297,17 +303,24 @@ const addToJson = async (address, reward) => {
 
   if (proxy) {
     // if it does, the airdrop goes to the proxy
-    return await save("xdai.json", [{ address: proxy, earnings, reasons: "" }]);
+    return { entry: [{ address: proxy, earnings, reasons: "" }] };
   }
 
   // is this a mainnet account? check if nonce > 0
   const nonce = await mainnetProvider.getTransactionCount(address);
   if (nonce > 0) {
-    return await save("mainnet.json", entry);
+    return { mainnet: true, entry };
   }
 
-  // otherwise add to xdai
-  await save("xdai.json", entry);
+  return { entry };
+};
+
+const addToJson = (data) => {
+  if (data.mainnet) {
+    return save("mainnet.json", data.entry);
+  }
+
+  save("xdai.json", data.entry);
 };
 
 const generateMerkleRoot = () => {
@@ -356,12 +369,13 @@ const run = async () => {
   console.log("\nfetching xdai addresses");
   const xdai = await getAddresses(GRAPH_XDAI_HTTP, xdaiProvider);
 
-  console.log("\nfetching proxy owners");
+  console.log("\nfetching proxy owners for user group");
   // calc reward per user
   const totalUserProxies = [...new Set([...mainnet.users, ...xdai.users])];
   const totalUsers = await getOwners(totalUserProxies);
   const rewardPerUser = TOTAL_USER_REWARD.div(totalUsers.length);
 
+  console.log("fetching proxy owners for LP group");
   // calc reward per creator / lp
   const totalLpProxies = [...new Set([...mainnet.lps, ...xdai.lps])];
   const totalLps = await getOwners(totalLpProxies);
@@ -389,11 +403,14 @@ const run = async () => {
   // add rewards to json file
   const dedupedUsers = [...new Set([...totalUsers, ...totalLps])];
 
-  await Promise.all(
-    dedupedUsers.map(
-      async (address) => await addToJson(address, rewards[address])
-    )
+  console.log("building json files");
+  const entries = await Promise.all(
+    dedupedUsers.map((address) => getEntry(address, rewards[address]))
   );
+
+  for (let i = 0; i < entries.length; i++) {
+    addToJson(entries[i]);
+  }
 
   console.log("generating merkle root");
   generateMerkleRoot();
