@@ -14,6 +14,7 @@
   "scripts": {
     "start": "ts-node index.js",
     "topup": "ts-node topup.js",
-    "verify": "ts-node ./scripts/verify.ts"
+    "verify": "ts-node ./scripts/verify.ts",
+    "dxd": "ts-node dxd.js"
   }
 }
