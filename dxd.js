@@ -44,9 +44,51 @@ const DXD_ABI = [
 const DXD_ADDRESS = "0xa1d65E8fB6e87b60FECCBc582F7f97804B725521";
 const dxd = new ethers.Contract(DXD_ADDRESS, DXD_ABI, provider);
 
-const startBlock = 10012634;
-const endBlock = 12559235;
-const limit = 10000;
+const VESTING_FACTORY_ABI = [
+  {
+    anonymous: false,
+    inputs: [
+      {
+        indexed: false,
+        internalType: "address",
+        name: "vestingContractAddress",
+        type: "address",
+      },
+    ],
+    name: "VestingCreated",
+    type: "event",
+  },
+  {
+    inputs: [
+      { internalType: "address", name: "beneficiary", type: "address" },
+      { internalType: "uint256", name: "start", type: "uint256" },
+      { internalType: "uint256", name: "cliffDuration", type: "uint256" },
+      { internalType: "uint256", name: "duration", type: "uint256" },
+      { internalType: "bool", name: "revocable", type: "bool" },
+    ],
+    name: "create",
+    outputs: [],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+];
+const VESTING_FACTORY_ADDRESS = "0x9A75944Ed8B1Fff381f1eBf9DD0a75ea72F75727";
+const vesting = new ethers.Contract(
+  VESTING_FACTORY_ADDRESS,
+  VESTING_FACTORY_ABI,
+  provider
+);
+const VESTING_ABI = [
+  {
+    inputs: [],
+    name: "beneficiary",
+    outputs: [{ internalType: "address", name: "", type: "address" }],
+    stateMutability: "view",
+    type: "function",
+  },
+];
+
+const startBlock = 10012634; // dxd deployment block
 
 const log = (str) => {
   process.stdout.clearLine();
@@ -62,22 +104,70 @@ const clearJson = () => {
   } catch (err) {}
 };
 
+const getVestingMap = async (blockNumber) => {
+  console.log("building vesting map");
+  const fromBlock = 10699672; // vesting factory deployment block
+
+  const events = await vesting.queryFilter(
+    vesting.filters.VestingCreated(),
+    fromBlock,
+    blockNumber
+  );
+
+  const beneficiaries = await Promise.all(
+    events.map(async (event) => {
+      const vestingContractAddress = event.args.vestingContractAddress;
+      const contract = new ethers.Contract(
+        vestingContractAddress,
+        VESTING_ABI,
+        provider
+      );
+      const beneficiary = await contract.beneficiary();
+      return beneficiary;
+    })
+  );
+
+  const vestingMap = events.reduce(
+    (prev, curr, index) => ({
+      ...prev,
+      [curr.args.vestingContractAddress]: beneficiaries[index],
+    }),
+    {}
+  );
+
+  return vestingMap;
+};
+
 const run = async () => {
   clearJson();
+
+  const blockNumber = await provider.getBlockNumber();
+
+  const vestingMap = await getVestingMap(blockNumber);
   console.log("indexing addresses");
   let addresses = new Set();
 
-  // build search space
+  const progress = (chunk, len) => {
+    log(`${(chunk >= len ? 100 : (chunk / len) * 100).toFixed(2)}% complete`);
+  };
+
+  // search every block from dxd contract creation for a transfer event
+  // and index every unique address in the to / from event args
   const blocks = [];
-  for (let fromBlock = startBlock; fromBlock < endBlock; fromBlock += limit) {
+  const limit = 10000;
+  for (
+    let fromBlock = startBlock;
+    fromBlock < blockNumber;
+    fromBlock += limit
+  ) {
     blocks.push({ fromBlock, toBlock: fromBlock + limit });
   }
 
-  // process in chunks
   const chunks = 10;
   for (let i = 0; i < blocks.length; i += chunks) {
+    const chunk = i + chunks;
     await Promise.all(
-      blocks.slice(i, i + chunks).map(async ({ fromBlock, toBlock }) => {
+      blocks.slice(i, chunk).map(async ({ fromBlock, toBlock }) => {
         const response = await dxd.queryFilter(
           dxd.filters.Transfer(),
           fromBlock,
@@ -93,33 +183,47 @@ const run = async () => {
             addresses.add(evnt.args.to);
           }
         }
-
-        log(
-          `${(
-            ((fromBlock - startBlock) / (endBlock - startBlock)) *
-            100
-          ).toFixed(2)}% complete`
-        );
       })
     );
+    progress(chunk, blocks.length);
   }
 
   addresses = Array.from(addresses);
 
+  // fetch dxd balances for every address we found
   console.log("\nfetching balances");
-  const balances = await Promise.all(
-    addresses.map(async (address) =>
-      FixedNumber.from(await dxd.balanceOf(address))
-    )
-  );
+  let balances = [];
+  const addressChunks = 200;
+  for (let i = 0; i < addresses.length; i += addressChunks) {
+    const chunk = i + addressChunks;
+    const response = await Promise.all(
+      addresses.slice(i, chunk).map(async (address) => {
+        const balance = FixedNumber.from(await dxd.balanceOf(address));
+        return balance;
+      })
+    );
+    balances = [...balances, ...response];
+    progress(chunk, addresses.length);
+  }
 
+  // reassign balances from vesting contracts to beneficiaries
+  const balanceMap = addresses.reduce((prev, addr, index) => {
+    const address = vestingMap[addr] || addr;
+    const balance = balances[index];
+    if (prev[address]) {
+      return { ...prev, [address]: prev[address].addUnsafe(balance) };
+    }
+    return { ...prev, [address]: balance };
+  }, {});
+
+  console.log("\ngenerating merkle root");
+
+  // calculate rewards for each address
   const totalSupply = FixedNumber.from(await dxd.totalSupply());
   const hundred = FixedNumber.from(100);
-
-  console.log("generating merkle root");
-  entries = balances.reduce((prev, balance, index) => {
-    const address = addresses[index];
-    if (!balance.isZero()) {
+  entries = addresses.reduce((prev, address) => {
+    const balance = balanceMap[address];
+    if (balance && !balance.isZero()) {
       // The DXD holder airdrop is weighted, based at time of Snapshot.
       const perc = balance.divUnsafe(totalSupply).mulUnsafe(hundred);
       const reward = perc.divUnsafe(hundred).mulUnsafe(DXD_HOLDERS_REWARD);
@@ -132,6 +236,15 @@ const run = async () => {
     }
     return prev;
   }, []);
+
+  // make sure earnings are correct
+  const totalEarnings = entries.reduce(
+    (total, { earnings }) => total.add(earnings),
+    BigNumber.from(0)
+  );
+  if (totalEarnings.gt(BigNumber.from(DXD_HOLDERS_REWARD))) {
+    throw new Error("Total earnings higher than expected");
+  }
 
   const proofs = parseBalanceMap(entries);
   verifyAirdrop(proofs);
