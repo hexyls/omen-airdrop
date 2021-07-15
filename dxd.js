@@ -105,7 +105,6 @@ const clearJson = () => {
 };
 
 const getVestingMap = async (blockNumber) => {
-  console.log("building vesting map");
   const fromBlock = 10699672; // vesting factory deployment block
 
   const events = await vesting.queryFilter(
@@ -141,11 +140,25 @@ const getVestingMap = async (blockNumber) => {
 const run = async () => {
   clearJson();
 
+  const treasury = "0x519b70055af55A007110B4Ff99b0eA33071c720a";
+  const foundation = "0xBd12eBb77eF167a5FF93b7E572b33f2526aE3fd0";
+  const blacklist = {
+    [treasury]: true,
+    [foundation]: true,
+  };
+  const totalSupply = await dxd.totalSupply();
+  const treasuryBalance = await dxd.balanceOf(treasury);
+  const foundationBalance = await dxd.balanceOf(foundation);
+  const circulatingSupply = FixedNumber.from(
+    totalSupply.sub(treasuryBalance).sub(foundationBalance)
+  );
+
   const blockNumber = await provider.getBlockNumber();
 
-  const vestingMap = await getVestingMap(blockNumber);
-  console.log("indexing addresses");
   let addresses = new Set();
+  console.log("indexing addresses");
+
+  const vestingMap = await getVestingMap(blockNumber);
 
   const progress = (chunk, len) => {
     log(`${(chunk >= len ? 100 : (chunk / len) * 100).toFixed(2)}% complete`);
@@ -176,11 +189,13 @@ const run = async () => {
 
         for (let i = 0; i < response.length; i++) {
           const evnt = response[i];
-          if (evnt.args.from !== constants.AddressZero) {
-            addresses.add(evnt.args.from);
+          const from = evnt.args.from;
+          const to = evnt.args.to;
+          if (from !== constants.AddressZero && !blacklist[from]) {
+            addresses.add(from);
           }
-          if (evnt.args.to !== constants.AddressZero) {
-            addresses.add(evnt.args.to);
+          if (to !== constants.AddressZero && !blacklist[to]) {
+            addresses.add(to);
           }
         }
       })
@@ -219,13 +234,12 @@ const run = async () => {
   console.log("\ngenerating merkle root");
 
   // calculate rewards for each address
-  const totalSupply = FixedNumber.from(await dxd.totalSupply());
   const hundred = FixedNumber.from(100);
   entries = addresses.reduce((prev, address) => {
     const balance = balanceMap[address];
     if (balance && !balance.isZero()) {
       // The DXD holder airdrop is weighted, based at time of Snapshot.
-      const perc = balance.divUnsafe(totalSupply).mulUnsafe(hundred);
+      const perc = balance.divUnsafe(circulatingSupply).mulUnsafe(hundred);
       const reward = perc.divUnsafe(hundred).mulUnsafe(DXD_HOLDERS_REWARD);
       if (!reward.isZero()) {
         const earnings = BigNumber.from(
