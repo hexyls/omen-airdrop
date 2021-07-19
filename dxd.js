@@ -1,3 +1,4 @@
+const { request, gql } = require("graphql-request");
 const { ethers, utils, constants, BigNumber, FixedNumber } = require("ethers");
 const { parseBalanceMap } = require("./src/parse-balance-map.ts");
 const { verifyAirdrop } = require("./scripts/verify-merkle-root.ts");
@@ -89,6 +90,7 @@ const VESTING_ABI = [
 ];
 
 const startBlock = 10012634; // dxd deployment block
+const hundred = FixedNumber.from(100);
 
 const log = (str) => {
   process.stdout.clearLine();
@@ -137,21 +139,65 @@ const getVestingMap = async (blockNumber) => {
   return vestingMap;
 };
 
+// swapr
+const SWAPR_SUBGRAPH =
+  "https://api.thegraph.com/subgraphs/name/luzzif/swapr-mainnet-alpha";
+const swaprEthPair = ["0xb0dc4b36e0b4d2e3566d2328f6806ea0b76b4f13"];
+const swaprUsdtPair = ["0x67bf56e4cb13363cc1a5f243e51354e7b72a8930"];
+
+// uniswap
+const UNI_SUBGRAPH =
+  "https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v2";
+const uniPair = ["0x1c9052e823b5f4611ef7d5fb4153995b040ccbf5"];
+
+const LP_QUERY = gql`
+  query LPS($pairs: [ID!]!) {
+    liquidityPositions(
+      where: { pair_in: $pairs, liquidityTokenBalance_gt: "0" }
+    ) {
+      pair {
+        totalSupply
+        reserve0
+      }
+      user {
+        id
+      }
+      liquidityTokenBalance
+    }
+  }
+`;
+
+const addLps = async (addresses, balanceMap, subgraph, pairs) => {
+  const data = await request(subgraph, LP_QUERY, { pairs });
+  for (let i = 0; i < data.liquidityPositions.length; i++) {
+    const position = data.liquidityPositions[i];
+    const address = position.user.id;
+    const totalSupply = FixedNumber.from(position.pair.totalSupply);
+    const balance = FixedNumber.from(position.liquidityTokenBalance);
+    const reserve = FixedNumber.from(position.pair.reserve0);
+    const perc = balance.divUnsafe(totalSupply).mulUnsafe(hundred);
+    const dxd = perc.divUnsafe(hundred).mulUnsafe(reserve);
+    if (!(await isContract(address))) {
+      // add to balance
+      if (!addresses.includes(address)) {
+        addresses.push(address);
+      }
+      const existingBal = balanceMap[address];
+      balanceMap[address] = existingBal ? existingBal.addUnsafe(dxd) : dxd;
+    }
+  }
+};
+
+const isContract = async (addr) => {
+  const code = await provider.getCode(addr);
+  if (code === "0x") {
+    return false;
+  }
+  return true;
+};
+
 const run = async () => {
   clearJson();
-
-  const treasury = "0x519b70055af55A007110B4Ff99b0eA33071c720a";
-  const foundation = "0xBd12eBb77eF167a5FF93b7E572b33f2526aE3fd0";
-  const blacklist = {
-    [treasury]: true,
-    [foundation]: true,
-  };
-  const totalSupply = await dxd.totalSupply();
-  const treasuryBalance = await dxd.balanceOf(treasury);
-  const foundationBalance = await dxd.balanceOf(foundation);
-  const circulatingSupply = FixedNumber.from(
-    totalSupply.sub(treasuryBalance).sub(foundationBalance)
-  );
 
   const blockNumber = await provider.getBlockNumber();
 
@@ -191,10 +237,10 @@ const run = async () => {
           const evnt = response[i];
           const from = evnt.args.from;
           const to = evnt.args.to;
-          if (from !== constants.AddressZero && !blacklist[from]) {
+          if (from !== constants.AddressZero) {
             addresses.add(from);
           }
-          if (to !== constants.AddressZero && !blacklist[to]) {
+          if (to !== constants.AddressZero) {
             addresses.add(to);
           }
         }
@@ -204,6 +250,20 @@ const run = async () => {
   }
 
   addresses = Array.from(addresses);
+
+  const contracts = await Promise.all(
+    addresses.map(async (address) => await isContract(address))
+  );
+
+  // remove any contracts
+  addresses = addresses.filter((addr, index) => {
+    if (contracts[index]) {
+      if (!vestingMap[addr]) {
+        return false;
+      }
+    }
+    return true;
+  });
 
   // fetch dxd balances for every address we found
   console.log("\nfetching balances");
@@ -231,15 +291,26 @@ const run = async () => {
     return { ...prev, [address]: balance };
   }, {});
 
+  // add lps
+  console.log("\nadding swapr dxd/eth lps");
+  await addLps(addresses, balanceMap, SWAPR_SUBGRAPH, swaprEthPair);
+  console.log("\nadding swapr dxd/usdt lps");
+  await addLps(addresses, balanceMap, SWAPR_SUBGRAPH, swaprUsdtPair);
+  console.log("\nadding uniswap dxd/eth lps");
+  await addLps(addresses, balanceMap, UNI_SUBGRAPH, uniPair);
+
+  const snapshotDXDSupply = Object.values(balanceMap)
+    .filter((b) => b)
+    .reduce((prev, curr) => prev.addUnsafe(curr), FixedNumber.from(0));
+
   console.log("\ngenerating merkle root");
 
   // calculate rewards for each address
-  const hundred = FixedNumber.from(100);
   entries = addresses.reduce((prev, address) => {
     const balance = balanceMap[address];
     if (balance && !balance.isZero()) {
       // The DXD holder airdrop is weighted, based at time of Snapshot.
-      const perc = balance.divUnsafe(circulatingSupply).mulUnsafe(hundred);
+      const perc = balance.divUnsafe(snapshotDXDSupply).mulUnsafe(hundred);
       const reward = perc.divUnsafe(hundred).mulUnsafe(DXD_HOLDERS_REWARD);
       if (!reward.isZero()) {
         const earnings = BigNumber.from(
