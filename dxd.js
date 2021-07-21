@@ -1,5 +1,5 @@
 const { request, gql } = require("graphql-request");
-const { ethers, utils, constants, BigNumber, FixedNumber } = require("ethers");
+const { ethers, utils, BigNumber, FixedNumber } = require("ethers");
 const { parseBalanceMap } = require("./src/parse-balance-map.ts");
 const { verifyAirdrop } = require("./scripts/verify-merkle-root.ts");
 const fs = require("fs");
@@ -48,11 +48,14 @@ const dxd = new ethers.Contract(DXD_MAINNET_ADDRESS, DXD_ABI, provider);
 const hundred = FixedNumber.from(100);
 const DXD_HOLDERS_REWARD = FixedNumber.from(utils.parseUnits("4200000")); // DXD Holders: 4.2% [4,200,000 OMN]
 
-const log = (str) => {
-  process.stdout.clearLine();
-  process.stdout.cursorTo(0);
-  process.stdout.write(str);
-};
+const testing = true;
+const testingAddresses = [
+  "0x81a94868572ea6e430f9a72ed6c4afb8b5003fdf",
+  "0x11aa7ef6d9fb561b2050c90f655286ea2409a477",
+  "0x3111327edd38890c3fe564afd96b4c73e8101747",
+  "0x4502166be703312eae5137ad7399393b09471f27",
+  "0xa493f3Adf76560092088a61e9e314a08D0B1B2b8",
+];
 
 const clearJson = () => {
   try {
@@ -141,6 +144,21 @@ const isContract = async (addr) => {
   return true;
 };
 
+const blacklist = [
+  "0x0000000000000000000000000000000000000000",
+  "0x0000000000000000000000000000000000000001",
+];
+
+const included = async (address) => {
+  if (await isContract(address)) {
+    return false;
+  }
+  if (blacklist.includes(address)) {
+    return false;
+  }
+  return true;
+};
+
 const addLps = async (addresses, balanceMap, subgraph, pairs) => {
   const data = await request(subgraph, LP_QUERY, { pairs });
   for (let i = 0; i < data.liquidityPositions.length; i++) {
@@ -150,8 +168,10 @@ const addLps = async (addresses, balanceMap, subgraph, pairs) => {
     const balance = FixedNumber.from(position.liquidityTokenBalance);
     const reserve = FixedNumber.from(position.pair.reserve0);
     const perc = balance.divUnsafe(totalSupply).mulUnsafe(hundred);
-    const dxd = perc.divUnsafe(hundred).mulUnsafe(reserve);
-    if (!(await isContract(address))) {
+    const dxd = FixedNumber.from(
+      utils.parseUnits(perc.divUnsafe(hundred).mulUnsafe(reserve).toString())
+    );
+    if (await included(address)) {
       addresses.add(address);
       const existingBal = balanceMap[address];
       balanceMap[address] = existingBal ? existingBal.addUnsafe(dxd) : dxd;
@@ -180,8 +200,10 @@ const addBalancerLps = async (addresses, balanceMap, block) => {
       const address = utils.getAddress(position.userAddress.id);
       const balance = FixedNumber.from(position.balance);
       const perc = balance.divUnsafe(totalSupply).mulUnsafe(hundred);
-      const dxd = perc.divUnsafe(hundred).mulUnsafe(reserve);
-      if (!(await isContract(address))) {
+      const dxd = FixedNumber.from(
+        utils.parseUnits(perc.divUnsafe(hundred).mulUnsafe(reserve).toString())
+      );
+      if (await included(address)) {
         addresses.add(address);
         const existingBal = balanceMap[address];
         balanceMap[address] = existingBal ? existingBal.addUnsafe(dxd) : dxd;
@@ -193,10 +215,10 @@ const addBalancerLps = async (addresses, balanceMap, block) => {
 const run = async () => {
   clearJson();
 
+  const additional = testing ? testingAddresses : [];
+  const cache = JSON.parse(fs.readFileSync("dxdCache.json"));
   const addresses = new Set(
-    JSON.parse(fs.readFileSync("dxdCache.json")).map((address) =>
-      utils.getAddress(address)
-    )
+    [...cache, ...additional].map((address) => utils.getAddress(address))
   );
 
   const blockNumber = await provider.getBlockNumber();
@@ -204,6 +226,13 @@ const run = async () => {
   // fetch dxd balances
   console.log("fetching balances");
   const balances = {};
+  if (testing) {
+    for (let i = 0; i < testingAddresses.length; i++) {
+      const address = utils.getAddress(testingAddresses[i]);
+      balances[address] = FixedNumber.from("20000000000000000000");
+    }
+  }
+
   await Promise.all(
     Array.from(addresses).map(async (address) => {
       const balance = FixedNumber.from(await dxd.balanceOf(address));
@@ -221,7 +250,7 @@ const run = async () => {
   console.log("adding uniswap dxd/eth lps");
   await addLps(addresses, balances, UNI_SUBGRAPH, uniPair);
 
-  console.log("adding honeryswap dxd/dai lps");
+  console.log("adding honeyswap dxd/dai lps");
   await addLps(addresses, balances, HONEY_SUBGRAPH, honeyPair);
 
   console.log("adding balancer lps");
@@ -235,7 +264,7 @@ const run = async () => {
   console.log("generating merkle root");
 
   // calculate rewards for each address
-  entries = Array.from(addresses).reduce((prev, address) => {
+  entries = Array.from(addresses).reduce((prev, address, index) => {
     const balance = balances[address];
     if (balance && !balance.isZero()) {
       // The DXD holder airdrop is weighted, based at time of Snapshot.
@@ -256,6 +285,7 @@ const run = async () => {
     (total, { earnings }) => total.add(earnings),
     BigNumber.from(0)
   );
+
   if (totalEarnings.gt(BigNumber.from(DXD_HOLDERS_REWARD))) {
     throw new Error("Total earnings higher than expected");
   }
