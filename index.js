@@ -48,6 +48,15 @@ const blacklist = {
   "0x9083A2B699c0a4AD06F63580BDE2635d26a3eeF0": true,
 };
 
+const testing = false;
+const testingAddresses = [
+  "0x81a94868572ea6e430f9a72ed6c4afb8b5003fdf",
+  "0x11aa7ef6d9fb561b2050c90f655286ea2409a477",
+  "0x3111327edd38890c3fe564afd96b4c73e8101747",
+  "0x4502166be703312eae5137ad7399393b09471f27",
+  "0xa493f3Adf76560092088a61e9e314a08D0B1B2b8",
+];
+
 const joinHexData = (hexData) => {
   return `0x${hexData
     .map((hex) => {
@@ -215,6 +224,10 @@ const getProxyOwner = async (proxyAddress) => {
 };
 
 const getOwner = async (proxyAddress) => {
+  if (testing && testingAddresses.includes(proxyAddress)) {
+    return proxyAddress;
+  }
+
   // get the owner of a proxy
   const owner = await getProxyOwner(proxyAddress);
 
@@ -232,12 +245,12 @@ const getOwner = async (proxyAddress) => {
   return owner;
 };
 
-const getOwners = async (proxies) => {
-  const owners = new Set();
+const getOwners = async (proxies, additonal = []) => {
+  const owners = new Set([...additonal.map((addr) => utils.getAddress(addr))]);
   await Promise.all(
     proxies.map(async (proxy) => {
       const owner = await getOwner(proxy);
-      owners.add(owner);
+      owners.add(utils.getAddress(owner));
     })
   );
   return [...owners];
@@ -295,11 +308,15 @@ const save = (name, obj) => {
 };
 
 const getEntry = async (address, reward) => {
-  // check if this user has a tight xdai integration proxy
-  const proxy = await getRelayProxyAddress(address);
-
   const earnings = BigNumber.from(reward).toHexString();
   const entry = [{ address, earnings, reasons: "" }];
+
+  if (testing && testingAddresses.includes(address)) {
+    return { mainnet: true, entry };
+  }
+
+  // check if this user has a tight xdai integration proxy
+  const proxy = await getRelayProxyAddress(address);
 
   if (proxy) {
     // if it does, the airdrop goes to the proxy
@@ -372,7 +389,10 @@ const run = async () => {
   console.log("\nfetching proxy owners for user group");
   // calc reward per user
   const totalUserProxies = [...new Set([...mainnet.users, ...xdai.users])];
-  const totalUsers = await getOwners(totalUserProxies);
+  const totalUsers = await getOwners(
+    totalUserProxies,
+    testing ? testingAddresses : []
+  );
   const rewardPerUser = TOTAL_USER_REWARD.div(totalUsers.length);
 
   console.log("fetching proxy owners for LP group");
