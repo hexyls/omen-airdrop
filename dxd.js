@@ -236,7 +236,10 @@ const run = async () => {
   await Promise.all(
     Array.from(addresses).map(async (address) => {
       const balance = FixedNumber.from(await dxd.balanceOf(address));
-      balances[address] = balance;
+      const existingBal = balances[address];
+      balances[address] = existingBal
+        ? existingBal.addUnsafe(balance)
+        : balance;
     })
   );
 
