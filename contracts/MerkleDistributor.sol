@@ -205,6 +205,7 @@ interface IMerkleDistributor {
 contract MerkleDistributor is IMerkleDistributor, Ownable {
     address public immutable override token;
     bytes32 public immutable override merkleRoot;
+    uint256 public immutable deployed;
 
     // This is a packed array of booleans.
     mapping(uint256 => uint256) private claimedBitMap;
@@ -212,9 +213,11 @@ contract MerkleDistributor is IMerkleDistributor, Ownable {
     constructor(address token_, bytes32 merkleRoot_) public {
         token = token_;
         merkleRoot = merkleRoot_;
+        deployed = now;
     }
-    
-    function withdraw() onlyOwner() public {
+
+    function withdraw() public onlyOwner() {
+      require(now - deployed >= 90 days, 'MerkleDistributor: Too early to withdraw.');
       IERC20 _token = IERC20(token);
       require(_token.transfer(owner(), _token.balanceOf(address(this))), 'MerkleDistributor: Withdraw failed.');
     }
