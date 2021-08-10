@@ -216,7 +216,7 @@ contract MerkleDistributor is IMerkleDistributor, Ownable {
         deployed = now;
     }
 
-    function withdraw() public onlyOwner() {
+    function withdraw() public onlyOwner {
       require(now - deployed >= 90 days, 'MerkleDistributor: Too early to withdraw.');
       IERC20 _token = IERC20(token);
       require(_token.transfer(owner(), _token.balanceOf(address(this))), 'MerkleDistributor: Withdraw failed.');

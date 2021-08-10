@@ -1,5 +1,7 @@
 const { request, gql } = require("graphql-request");
 const fs = require("fs");
+const path = require("path");
+
 const { ethers, utils, BigNumber } = require("ethers");
 const { parseBalanceMap } = require("./src/parse-balance-map.ts");
 const { verifyAirdrop } = require("./scripts/verify-merkle-root.ts");
@@ -48,12 +50,12 @@ const blacklist = {
   "0x9083A2B699c0a4AD06F63580BDE2635d26a3eeF0": true,
 };
 
-const testing = false;
+const testing = true;
 const testingAddresses = [
-  "0x81a94868572ea6e430f9a72ed6c4afb8b5003fdf",
-  "0x11aa7ef6d9fb561b2050c90f655286ea2409a477",
-  "0x3111327edd38890c3fe564afd96b4c73e8101747",
-  "0x4502166be703312eae5137ad7399393b09471f27",
+  "0x81A94868572EA6E430F9a72ED6C4afB8b5003fDF",
+  "0x11AA7ef6d9Fb561b2050c90F655286eA2409A477",
+  "0x3111327EdD38890C3fe564afd96b4C73e8101747",
+  "0x4502166bE703312eae5137AD7399393b09471F27",
   "0xa493f3Adf76560092088a61e9e314a08D0B1B2b8",
 ];
 
@@ -224,10 +226,6 @@ const getProxyOwner = async (proxyAddress) => {
 };
 
 const getOwner = async (proxyAddress) => {
-  if (testing && testingAddresses.includes(proxyAddress)) {
-    return proxyAddress;
-  }
-
   // get the owner of a proxy
   const owner = await getProxyOwner(proxyAddress);
 
@@ -283,18 +281,29 @@ const getRelayProxyAddress = async (account) => {
       )
       .slice(-40)
   );
-  if (await isContract(xdaiProvider, proxyAddress)) {
-    return proxyAddress;
-  }
+  return proxyAddress;
+};
+
+const airdropPath = path.join(__dirname, "1");
+
+const pre = (fn) => {
+  try {
+    fn();
+  } catch (err) {}
 };
 
 const clearJson = () => {
   try {
-    fs.unlinkSync("mainnet.json");
-    fs.unlinkSync("xdai.json");
-    fs.unlinkSync("mainnetProofs.json");
-    fs.unlinkSync("xdaiProofs.json");
-  } catch (err) {}
+    pre(() => fs.unlinkSync("mainnet.json"));
+    pre(() => fs.unlinkSync("xdai.json"));
+    pre(() => fs.unlinkSync("mainnetProofs.json"));
+    pre(() => fs.unlinkSync("mainnet.json"));
+    pre(() => fs.unlinkSync("xdaiProofs.json"));
+    pre(() => fs.rmdirSync(airdropPath, { recursive: true, force: true }));
+    pre(() => fs.mkdirSync(airdropPath));
+  } catch (err) {
+    console.log(err);
+  }
 };
 
 const save = (name, obj) => {
@@ -309,61 +318,36 @@ const save = (name, obj) => {
 
 const getEntry = async (address, reward) => {
   const earnings = BigNumber.from(reward).toHexString();
-  const entry = [{ address, earnings, reasons: "" }];
-
-  if (testing && testingAddresses.includes(address)) {
-    return { mainnet: true, entry };
-  }
 
   // check if this user has a tight xdai integration proxy
   const proxy = await getRelayProxyAddress(address);
 
   if (proxy) {
     // if it does, the airdrop goes to the proxy
-    return { entry: [{ address: proxy, earnings, reasons: "" }] };
+    return { address: proxy, earnings, reasons: "" };
   }
-
-  // is this a mainnet account? check if nonce > 0
-  const nonce = await mainnetProvider.getTransactionCount(address);
-  if (nonce > 0) {
-    return { mainnet: true, entry };
-  }
-
-  return { entry };
 };
 
-const addToJson = (data) => {
-  if (data.mainnet) {
-    return save("mainnet.json", data.entry);
+const generateMerkleRoot = (entries) => {
+  const proofs = parseBalanceMap(entries);
+  verifyAirdrop(proofs);
+
+  const addresses = Object.keys(proofs.claims);
+  for (let i = 0; i < addresses.length; i++) {
+    const address = addresses[i];
+    fs.writeFileSync(
+      `./1/${address}.json`,
+      JSON.stringify(proofs.claims[address])
+    );
   }
 
-  save("xdai.json", data.entry);
-};
-
-const generateMerkleRoot = () => {
-  const mainnetJson = JSON.parse(fs.readFileSync("mainnet.json"));
-  const mainnetProofs = parseBalanceMap(mainnetJson);
-  verifyAirdrop(mainnetProofs);
-  fs.writeFileSync("mainnetProofs.json", JSON.stringify(mainnetProofs));
-
-  const xdaiJson = JSON.parse(fs.readFileSync("xdai.json"));
-  const xdaiProofs = parseBalanceMap(xdaiJson);
-  verifyAirdrop(xdaiProofs);
-  fs.writeFileSync("xdaiProofs.json", JSON.stringify(xdaiProofs));
-
-  // verify allocations
-  const totalMainnetAllocation = Object.values(mainnetProofs.claims).reduce(
-    (p, a) => p.add(a.amount),
-    BigNumber.from("0")
-  );
-
-  const totalxDaiAllocation = Object.values(xdaiProofs.claims).reduce(
+  const totalxDaiAllocation = Object.values(proofs.claims).reduce(
     (p, a) => p.add(a.amount),
     BigNumber.from("0")
   );
 
   const totalExpected = TOTAL_USER_REWARD.add(TOTAL_LP_REWARD);
-  const totalAllocation = totalMainnetAllocation.add(totalxDaiAllocation);
+  const totalAllocation = totalxDaiAllocation;
   if (
     !totalAllocation.eq(totalExpected) &&
     // allow 1000 wei in errors
@@ -428,12 +412,8 @@ const run = async () => {
     dedupedUsers.map((address) => getEntry(address, rewards[address]))
   );
 
-  for (let i = 0; i < entries.length; i++) {
-    addToJson(entries[i]);
-  }
-
   console.log("generating merkle root");
-  generateMerkleRoot();
+  generateMerkleRoot(entries);
 };
 
 run();

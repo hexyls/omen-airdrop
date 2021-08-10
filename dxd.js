@@ -3,6 +3,7 @@ const { ethers, utils, BigNumber, FixedNumber } = require("ethers");
 const { parseBalanceMap } = require("./src/parse-balance-map.ts");
 const { verifyAirdrop } = require("./scripts/verify-merkle-root.ts");
 const fs = require("fs");
+const path = require("path");
 
 const provider = new ethers.providers.JsonRpcBatchProvider(
   "https://mainnet.infura.io/v3/9c6788bb15234036991db4637638429f"
@@ -50,18 +51,18 @@ const DXD_HOLDERS_REWARD = FixedNumber.from(utils.parseUnits("4200000")); // DXD
 
 const testing = true;
 const testingAddresses = [
-  "0x81a94868572ea6e430f9a72ed6c4afb8b5003fdf",
-  "0x11aa7ef6d9fb561b2050c90f655286ea2409a477",
-  "0x3111327edd38890c3fe564afd96b4c73e8101747",
-  "0x4502166be703312eae5137ad7399393b09471f27",
+  "0x81A94868572EA6E430F9a72ED6C4afB8b5003fDF",
+  "0x11AA7ef6d9Fb561b2050c90F655286eA2409A477",
+  "0x3111327EdD38890C3fe564afd96b4C73e8101747",
+  "0x4502166bE703312eae5137AD7399393b09471F27",
   "0xa493f3Adf76560092088a61e9e314a08D0B1B2b8",
 ];
 
-const clearJson = () => {
-  try {
-    fs.unlinkSync("dxdProofs.json");
-  } catch (err) {}
-};
+// const clearJson = () => {
+//   try {
+//     fs.unlinkSync("dxdProofs.json");
+//   } catch (err) {}
+// };
 
 // swapr
 const SWAPR_SUBGRAPH =
@@ -213,8 +214,6 @@ const addBalancerLps = async (addresses, balanceMap, block) => {
 };
 
 const run = async () => {
-  clearJson();
-
   const additional = testing ? testingAddresses : [];
   const cache = JSON.parse(fs.readFileSync("dxdCache.json"));
   const addresses = new Set(
@@ -298,4 +297,115 @@ const run = async () => {
   fs.writeFileSync("dxdProofs.json", JSON.stringify(proofs));
 };
 
-run();
+const joinHexData = (hexData) => {
+  return `0x${hexData
+    .map((hex) => {
+      const stripped = hex.replace(/^0x/, "");
+      return stripped.length % 2 === 0 ? stripped : "0" + stripped;
+    })
+    .join("")}`;
+};
+
+const abiEncodePacked = (...params) => {
+  return joinHexData(
+    params.map(({ type, value }) => {
+      const encoded = ethers.utils.defaultAbiCoder.encode([type], [value]);
+      if (type === "bytes" || type === "string") {
+        const bytesLength = parseInt(encoded.slice(66, 130), 16);
+        return encoded.slice(130, 130 + 2 * bytesLength);
+      }
+      let typeMatch = type.match(/^(?:u?int\d*|bytes\d+|address)\[\]$/);
+      if (typeMatch) {
+        return encoded.slice(130);
+      }
+      if (type.startsWith("bytes")) {
+        const bytesLength = parseInt(type.slice(5));
+        return encoded.slice(2, 2 + 2 * bytesLength);
+      }
+      typeMatch = type.match(/^u?int(\d*)$/);
+      if (typeMatch) {
+        if (typeMatch[1] !== "") {
+          const bytesLength = parseInt(typeMatch[1]) / 8;
+          return encoded.slice(-2 * bytesLength);
+        }
+        return encoded.slice(-64);
+      }
+      if (type === "address") {
+        return encoded.slice(-40);
+      }
+      throw new Error(`unsupported type ${type}`);
+    })
+  );
+};
+
+const getRelayProxyAddress = (account) => {
+  // calc the expected proxy address for a given user
+  // check if that address is deployed on xdai
+  const predeterminedSaltNonce =
+    "0xcfe33a586323e7325be6aa6ecd8b4600d232a9037e83c8ece69413b777dabe65";
+  const proxyCreationCode = `0x608060405234801561001057600080fd5b506040516101e73803806101e78339818101604052602081101561003357600080fd5b8101908080519060200190929190505050600073ffffffffffffffffffffffffffffffffffffffff168173ffffffffffffffffffffffffffffffffffffffff1614156100ca576040517f08c379a00000000000000000000000000000000000000000000000000000000081526004018080602001828103825260248152602001806101c36024913960400191505060405180910390fd5b806000806101000a81548173ffffffffffffffffffffffffffffffffffffffff021916908373ffffffffffffffffffffffffffffffffffffffff1602179055505060aa806101196000396000f3fe608060405273ffffffffffffffffffffffffffffffffffffffff600054167fa619486e0000000000000000000000000000000000000000000000000000000060003514156050578060005260206000f35b3660008037600080366000845af43d6000803e60008114156070573d6000fd5b3d6000f3fea265627a7a72315820cac3d62bfce6ec8b54a3201159f745e39db8fa84029fbcaa233ea75c5ceaac8264736f6c63430005100032496e76616c6964206d617374657220636f707920616464726573732070726f7669646564`;
+  const relayProxyFactoryAddress = "0x7b9756f8A7f4208fE42FE8DE8a8CC5aA9A03f356";
+  const masterCopy = "0x6851D6fDFAfD08c0295C392436245E5bc78B0185";
+  const saltNonce = predeterminedSaltNonce;
+  const salt = utils.keccak256(
+    utils.defaultAbiCoder.encode(["address", "uint256"], [account, saltNonce])
+  );
+  const initCode = abiEncodePacked(
+    { type: "bytes", value: proxyCreationCode },
+    {
+      type: "bytes",
+      value: utils.defaultAbiCoder.encode(["address"], [masterCopy]),
+    }
+  );
+  const proxyAddress = utils.getAddress(
+    utils
+      .solidityKeccak256(
+        ["bytes", "address", "bytes32", "bytes32"],
+        ["0xff", relayProxyFactoryAddress, salt, utils.keccak256(initCode)]
+      )
+      .slice(-40)
+  );
+  return proxyAddress;
+};
+
+const airdropPath = path.join(__dirname, "2");
+
+const pre = (fn) => {
+  try {
+    fn();
+  } catch (err) {}
+};
+
+const clearJson = () => {
+  try {
+    pre(() => fs.rmdirSync(airdropPath, { recursive: true, force: true }));
+    pre(() => fs.mkdirSync(airdropPath));
+  } catch (err) {
+    console.log(err);
+  }
+};
+
+const wrangle = () => {
+  clearJson();
+
+  const leaves = require("./marketing-airdrop-eoa-leaves.json");
+
+  const entries = leaves.map(({ account, amount }) => ({
+    address: getRelayProxyAddress(account),
+    earnings: BigNumber.from(amount).toHexString(),
+    reasons: "",
+  }));
+
+  const proofs = parseBalanceMap(entries);
+  verifyAirdrop(proofs);
+  const addresses = Object.keys(proofs.claims);
+  for (let i = 0; i < addresses.length; i++) {
+    const address = addresses[i];
+    fs.writeFileSync(
+      `./2/${address}.json`,
+      JSON.stringify(proofs.claims[address])
+    );
+  }
+};
+
+wrangle();
