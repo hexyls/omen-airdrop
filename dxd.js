@@ -397,6 +397,7 @@ const wrangle = () => {
   }));
 
   const proofs = parseBalanceMap(entries);
+  console.log(proofs.merkleRoot);
   verifyAirdrop(proofs);
   const addresses = Object.keys(proofs.claims);
   for (let i = 0; i < addresses.length; i++) {

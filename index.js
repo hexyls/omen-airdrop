@@ -330,6 +330,9 @@ const getEntry = async (address, reward) => {
 
 const generateMerkleRoot = (entries) => {
   const proofs = parseBalanceMap(entries);
+
+  console.log(proofs.merkleRoot);
+
   verifyAirdrop(proofs);
 
   const addresses = Object.keys(proofs.claims);
